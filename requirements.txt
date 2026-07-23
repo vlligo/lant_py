@@ -1,0 +1,11 @@
+# Core
+numpy>=1.24
+PySide6>=6.6
+
+# Speed: build the Cython engine with `cd engine && python setup.py build_ext --inplace`
+Cython>=3.0
+
+# Statistics dashboard (TensorBoard). CPU-only torch is enough — it's used
+# purely for its SummaryWriter, no model/training involved.
+torch>=2.2
+tensorboard>=2.15
