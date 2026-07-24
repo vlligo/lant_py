@@ -9,7 +9,8 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QGridLayout,
                                 QTableWidgetItem, QVBoxLayout, QWidget)
 
 from engine.common import DIRECTION_SYMBOLS, PRESETS, expand_rule_shorthand
-from engine.highway import (HighwayStatus, KNOWN_HIGHWAYS, get_highway_status,
+from engine.highway import (DEFAULT_SCAN_BUDGET, HighwayStatus, KNOWN_HIGHWAYS,
+                            SCAN_BUDGET_PRESETS, get_highway_status,
                             supports_highway_detection)
 from gui.antfieldwidget import AntFieldWidget, DisplayStyle
 from gui.highway_worker import HighwayScanner
@@ -186,11 +187,33 @@ class MainWindow(QMainWindow):
         stats_layout.addWidget(self.stats_dialog_button, 0, 5)
 
         self.highway_label = QLabel("Highway: n/a")
-        stats_layout.addWidget(self.highway_label, 1, 0, 1, 4)
+        stats_layout.addWidget(self.highway_label, 1, 0, 1, 3)
+
+        self.scan_budget_combo = QComboBox()
+        for name, value in SCAN_BUDGET_PRESETS:
+            self.scan_budget_combo.addItem(name, value)
+        self.scan_budget_combo.addItem("Custom…", None)
+        default_index = next(
+            (i for i, (_, v) in enumerate(SCAN_BUDGET_PRESETS) if v == DEFAULT_SCAN_BUDGET), 0)
+        self.scan_budget_combo.setCurrentIndex(default_index)
+        self.scan_budget_combo.setToolTip(
+            "How far ahead a highway scan may simulate before giving up.\n"
+            "Only matters when no highway is found — a scan stops the "
+            "moment it detects one, so a large budget is usually free.")
+        stats_layout.addWidget(self.scan_budget_combo, 1, 3)
+
+        self.scan_budget_spin = IntSpinBox()
+        self.scan_budget_spin.setRange(10_000, 10**15)
+        self.scan_budget_spin.setValue(DEFAULT_SCAN_BUDGET)
+        self.scan_budget_spin.setSingleStep(1_000_000)
+        self.scan_budget_spin.setSuffix(" steps")
+        self.scan_budget_spin.setVisible(False)   # shown only for "Custom..."
+        stats_layout.addWidget(self.scan_budget_spin, 1, 4)
+
         self.rescan_highway_button = QPushButton("Rescan Highway")
         self.rescan_highway_button.setToolTip(
             "Simulate ahead from the current state to locate the highway.")
-        stats_layout.addWidget(self.rescan_highway_button, 1, 4, 1, 2)
+        stats_layout.addWidget(self.rescan_highway_button, 1, 5)
         grid.addWidget(stats_group, row, 0, 1, 6)
 
         self.style_button = QPushButton("Next Style")
@@ -269,9 +292,10 @@ class MainWindow(QMainWindow):
         self.stats_checkbox.toggled.connect(self._toggle_statistics)
 
         self.highway_scanner.started.connect(self._on_highway_scan_started)
+        self.highway_scanner.progress.connect(self._on_highway_progress)
         self.highway_scanner.resultReady.connect(self._on_highway_result)
-        self.rescan_highway_button.clicked.connect(
-            lambda: self._refresh_highway(force_scan=True))
+        self.rescan_highway_button.clicked.connect(self._on_rescan_clicked)
+        self.scan_budget_combo.currentIndexChanged.connect(self._on_scan_budget_changed)
 
         self.stats_timer = QTimer(self)
         self.stats_timer.timeout.connect(self._periodic_stats_update)
@@ -351,6 +375,8 @@ class MainWindow(QMainWindow):
         rules = engine.rules
 
         if not supports_highway_detection(rules):
+            self.highway_scanner.cancel()
+            self._set_scanning_ui(False)
             self.highway_status = HighwayStatus(
                 reason=f"No known highway period for rule '{rules}'. "
                        f"Supported: {', '.join(sorted(KNOWN_HIGHWAYS))}.")
@@ -362,28 +388,74 @@ class MainWindow(QMainWindow):
         pristine = getattr(engine, "grid_pristine", False)
 
         if pristine and not force_scan:
-            # Deterministic run from an empty grid: the onset is a constant.
+            # Deterministic run from an empty grid: the onset is a constant,
+            # so any scan still running is now pointless work.
+            self.highway_scanner.cancel()
+            self._set_scanning_ui(False)
             self.highway_status = get_highway_status(rules, engine.step_count, True)
             self._update_highway_label()
             return
 
         # Perturbed grid: the onset depends on every randomized cell, so it
         # has to be found by simulating ahead.
-        self.highway_scanner.request(engine)
+        self.highway_scanner.request(engine, max_steps=self._scan_budget())
+
+    def _scan_budget(self) -> int:
+        """Currently selected scan budget, from preset or custom entry."""
+        preset = self.scan_budget_combo.currentData()
+        if preset is None:                      # "Custom..."
+            return self.scan_budget_spin.value()
+        return preset
+
+    def _on_scan_budget_changed(self):
+        custom = self.scan_budget_combo.currentData() is None
+        self.scan_budget_spin.setVisible(custom)
+
+    def _on_rescan_clicked(self):
+        # The button doubles as a cancel control while a scan is running —
+        # a big budget can take minutes, so abandoning it must be possible.
+        if self.highway_scanner.is_scanning():
+            self.highway_scanner.cancel()
+            self._set_scanning_ui(False)
+            self.highway_label.setText("Highway: scan cancelled")
+            self.statusBar().showMessage("Highway scan cancelled.", 3000)
+            return
+        self._refresh_highway(force_scan=True)
+
+    def _set_scanning_ui(self, scanning: bool):
+        self.rescan_highway_button.setText("Cancel Scan" if scanning else "Rescan Highway")
+        self.scan_budget_combo.setEnabled(not scanning)
+        self.scan_budget_spin.setEnabled(not scanning)
 
     def _on_highway_scan_started(self):
+        self._set_scanning_ui(True)
         self.highway_label.setText("Highway: scanning ahead\u2026")
         self.highway_label.setToolTip(
             "Simulating forward on a background thread to locate the highway.")
 
+    def _on_highway_progress(self, steps_done: int, budget: int):
+        pct = (steps_done / budget * 100.0) if budget else 0.0
+        self.highway_label.setText(
+            f"Highway: scanning\u2026 {steps_done:,} / {budget:,} steps ({pct:.0f}%)")
+
     def _on_highway_result(self, status: HighwayStatus):
+        self._set_scanning_ui(False)
         self.highway_status = status
         self._update_highway_label()
         if status.known:
             self.statusBar().showMessage(
                 f"Highway located after simulating {status.steps_scanned:,} steps ahead.", 4000)
+        elif status.budget_exhausted:
+            # Only suggest a bigger budget when the budget is what stopped us.
+            self.statusBar().showMessage(
+                f"No highway within {status.steps_scanned:,} steps \u2014 "
+                "try a larger scan budget.", 6000)
 
     def _update_highway_label(self):
+        # While a scan is running the label belongs to the progress reporter;
+        # the 500 ms stats timer must not stamp a stale result over it.
+        if self.highway_scanner.is_scanning():
+            return
         current = self.highway_status.for_step(self.ant_field.engine.step_count)
         self.highway_label.setText(current.format())
         self.highway_label.setToolTip(current.tooltip())

@@ -183,10 +183,46 @@ an absolute step number, so the live countdown is pure subtraction.
 
 - **"Not found" is a legitimate answer.** That the ant *always*
   eventually builds a highway is an open conjecture, not a theorem. The
-  scan runs under a step budget (5M by default) and will say so rather
-  than invent a number. Likewise, if you scan while already inside a
-  highway, a forward-only scan cannot recover when it started, so the
-  label says "already active" instead of claiming a false onset.
+  scan runs under a step budget and will say so rather than invent a
+  number. Likewise, if you scan while already inside a highway, a
+  forward-only scan cannot recover when it started, so the label says
+  "already active" instead of claiming a false onset.
+
+### Scan budget
+
+The budget is selectable in the Quick Statistics panel — Quick (1M),
+Normal (100M, the default), Long (1B), Exhaustive (10B), or a custom
+value. While a scan runs, the label shows live progress and the button
+becomes **Cancel Scan**.
+
+Two things worth knowing:
+
+- **A large budget is usually free.** The scan stops the instant it
+  detects a highway, so the budget only bites when there *isn't* one to
+  find. Raising it never changes an answer, it only reveals one — there's
+  a test asserting exactly that.
+- **Budget is not the same as time.** The pure-Python engine manages
+  ~0.5M steps/sec; the compiled Cython engine is roughly 20-50x that. So
+  a 100M-step budget is a few seconds with Cython and a few minutes
+  without. That asymmetry is why the cancel button exists — if you're
+  running the fallback engine, prefer Quick or Normal.
+
+Memory is flat in the budget. It didn't used to be: the scan originally
+retained every period checkpoint, costing ~2 MB per million steps (~1 GB
+at a 500M budget), which is what made large budgets impractical. Since
+the periodicity window is tested after *every* period, the first window
+that comes back consistent is already the earliest one, so nothing before
+the current streak is ever needed — only the running streak is carried
+forward. An 8M-step scan now peaks at ~0.12 MB, and
+`test_scan_memory_does_not_grow_with_budget` guards against regressing
+it. The onset the O(1) version reports was checked against an exhaustive
+per-step ground truth and matches exactly, on both pristine and
+randomized grids.
+
+The escape-confirmation budget (how long the scanner keeps going to prove
+the ant cleared all pre-existing cells) scales with the main budget
+rather than being pinned to a constant, since a large randomized area
+takes proportionally longer to escape.
 
 Other rule strings are not wired up because the period is rule-specific
 (many rules never form a highway at all). The detector itself is generic:

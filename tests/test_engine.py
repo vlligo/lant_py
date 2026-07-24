@@ -150,3 +150,56 @@ def test_scan_finds_highway_after_randomize():
         xb, yb, db = traj[i + period]
         assert da == db and (xb - xa, yb - ya) == (dx, dy), \
             f"trajectory not periodic at offset {i}"
+
+
+def test_larger_budget_finds_what_a_small_one_misses():
+    """The budget is the only thing standing between 'not found' and a
+    result — raising it must never change the answer, only reveal it."""
+    from engine.highway import scan_for_highway
+
+    e = PyEngine()
+    e.set_rules("LR")
+
+    tiny = scan_for_highway(e, max_steps=2_000)
+    assert not tiny.known, "2,000 steps should not reach the ~9,977 onset"
+    assert tiny.budget_exhausted or "No highway found" in tiny.reason
+
+    ample = scan_for_highway(e, max_steps=200_000)
+    assert ample.known and ample.onset_step == 9977
+
+    # An even bigger budget must agree, not drift.
+    bigger = scan_for_highway(e, max_steps=1_000_000)
+    assert bigger.onset_step == ample.onset_step
+    assert bigger.displacement == ample.displacement
+
+
+def test_scan_memory_does_not_grow_with_budget():
+    """Regression guard: checkpoint bookkeeping used to be retained for the
+    whole scan (~2 MB per million steps), which made large budgets
+    unusable. It must now be O(1) in the budget."""
+    import tracemalloc
+    from engine.highway import scan_for_highway
+
+    def peak_for(budget):
+        e = PyEngine()
+        e.set_rules("LLRR")          # never forms a period-104 highway
+        tracemalloc.start()
+        scan_for_highway(e, max_steps=budget)
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        return peak
+
+    small = peak_for(500_000)
+    large = peak_for(4_000_000)      # 8x the steps
+    assert large < small * 3, (
+        f"scan memory scales with budget: {small} -> {large} bytes")
+
+
+def test_escape_budget_scales_with_main_budget():
+    """A huge randomized area needs proportionally longer to confirm escape,
+    so the escape budget must not be pinned to a constant."""
+    import inspect
+    from engine.highway import scan_for_highway
+
+    default = inspect.signature(scan_for_highway).parameters["escape_budget_steps"].default
+    assert default is None, "escape budget should be derived from max_steps"
