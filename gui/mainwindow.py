@@ -9,7 +9,10 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QGridLayout,
                                 QTableWidgetItem, QVBoxLayout, QWidget)
 
 from engine.common import DIRECTION_SYMBOLS, PRESETS, expand_rule_shorthand
+from engine.highway import (HighwayStatus, KNOWN_HIGHWAYS, get_highway_status,
+                            supports_highway_detection)
 from gui.antfieldwidget import AntFieldWidget, DisplayStyle
+from gui.highway_worker import HighwayScanner
 from gui.int_spinbox import IntSpinBox
 from stats.tb_logger import TensorBoardLogger, TENSORBOARD_AVAILABLE
 
@@ -23,6 +26,12 @@ class MainWindow(QMainWindow):
         self.last_custom_steps = 1000
         self.current_style_index = 0
         self.tb_logger: TensorBoardLogger | None = None
+
+        # Cached highway result. The onset is an absolute step number, so
+        # this is computed once per configuration change and the live
+        # countdown is then just subtraction — no rescanning per frame.
+        self.highway_status: HighwayStatus = HighwayStatus()
+        self.highway_scanner = HighwayScanner(self)
 
         self._setup_ui()
         self._setup_connections()
@@ -175,6 +184,13 @@ class MainWindow(QMainWindow):
         stats_layout.addWidget(self.cell_details_button, 0, 4)
         self.stats_dialog_button = QPushButton("Detailed Statistics")
         stats_layout.addWidget(self.stats_dialog_button, 0, 5)
+
+        self.highway_label = QLabel("Highway: n/a")
+        stats_layout.addWidget(self.highway_label, 1, 0, 1, 4)
+        self.rescan_highway_button = QPushButton("Rescan Highway")
+        self.rescan_highway_button.setToolTip(
+            "Simulate ahead from the current state to locate the highway.")
+        stats_layout.addWidget(self.rescan_highway_button, 1, 4, 1, 2)
         grid.addWidget(stats_group, row, 0, 1, 6)
 
         self.style_button = QPushButton("Next Style")
@@ -252,6 +268,11 @@ class MainWindow(QMainWindow):
         self.toggle_panel_button.clicked.connect(self._toggle_stats_panel)
         self.stats_checkbox.toggled.connect(self._toggle_statistics)
 
+        self.highway_scanner.started.connect(self._on_highway_scan_started)
+        self.highway_scanner.resultReady.connect(self._on_highway_result)
+        self.rescan_highway_button.clicked.connect(
+            lambda: self._refresh_highway(force_scan=True))
+
         self.stats_timer = QTimer(self)
         self.stats_timer.timeout.connect(self._periodic_stats_update)
         self.stats_timer.start(500)
@@ -281,6 +302,9 @@ class MainWindow(QMainWindow):
                 return
 
         self.ant_field.randomize_area(radius)
+        # The randomized cells change where (and whether) the highway forms,
+        # so the cached onset is now meaningless — find the new one.
+        self._refresh_highway()
         side = 2 * radius + 1
         self.statusBar().showMessage(f"Randomized a {side:,}x{side:,} area around the ant.", 3000)
 
@@ -308,8 +332,61 @@ class MainWindow(QMainWindow):
             self.stats_label.setText(
                 f"Most visited: ({mv[0]:,}, {mv[1]:,}) = {summary.max_visits_per_cell:,} times")
 
+        self._update_highway_label()
+
         if self.tb_logger is not None and self.tb_logger.enabled:
             self.tb_logger.log_summary(summary, self.ant_field.get_rules())
+
+    # -- highway countdown ---------------------------------------------- #
+    def _refresh_highway(self, force_scan: bool = False):
+        """Decide how to obtain the highway onset, and update the label.
+
+        Three cases:
+          * unsupported rule      -> nothing to show
+          * pristine grid         -> known constant, instant, no scan
+          * randomized / loaded   -> no constant exists, so scan ahead on
+                                     a background thread
+        """
+        engine = self.ant_field.engine
+        rules = engine.rules
+
+        if not supports_highway_detection(rules):
+            self.highway_status = HighwayStatus(
+                reason=f"No known highway period for rule '{rules}'. "
+                       f"Supported: {', '.join(sorted(KNOWN_HIGHWAYS))}.")
+            self.rescan_highway_button.setEnabled(False)
+            self._update_highway_label()
+            return
+
+        self.rescan_highway_button.setEnabled(True)
+        pristine = getattr(engine, "grid_pristine", False)
+
+        if pristine and not force_scan:
+            # Deterministic run from an empty grid: the onset is a constant.
+            self.highway_status = get_highway_status(rules, engine.step_count, True)
+            self._update_highway_label()
+            return
+
+        # Perturbed grid: the onset depends on every randomized cell, so it
+        # has to be found by simulating ahead.
+        self.highway_scanner.request(engine)
+
+    def _on_highway_scan_started(self):
+        self.highway_label.setText("Highway: scanning ahead\u2026")
+        self.highway_label.setToolTip(
+            "Simulating forward on a background thread to locate the highway.")
+
+    def _on_highway_result(self, status: HighwayStatus):
+        self.highway_status = status
+        self._update_highway_label()
+        if status.known:
+            self.statusBar().showMessage(
+                f"Highway located after simulating {status.steps_scanned:,} steps ahead.", 4000)
+
+    def _update_highway_label(self):
+        current = self.highway_status.for_step(self.ant_field.engine.step_count)
+        self.highway_label.setText(current.format())
+        self.highway_label.setToolTip(current.tooltip())
 
     def _update_rules(self):
         expanded, compressed, error = expand_rule_shorthand(self.rules_edit.text())
@@ -322,6 +399,7 @@ class MainWindow(QMainWindow):
 
         self.ant_field.set_rules(expanded)
         self.rules_label.setText(f"Rules: {compressed}")
+        self._refresh_highway()
         self._update_quick_statistics()
 
     def _on_ant_moved(self, x, y, direction, steps):
@@ -352,6 +430,7 @@ class MainWindow(QMainWindow):
 
     def _reset_simulation(self):
         self.ant_field.reset()
+        self._refresh_highway()
         self._update_quick_statistics()
         self._update_statistics_table()
 
@@ -493,6 +572,7 @@ class MainWindow(QMainWindow):
                 self.rules_edit.setText(loaded_rules)
                 self.rules_label.setText(f"Rules: {loaded_rules}")
                 self.stats_checkbox.setChecked(self.ant_field.is_statistics_enabled())
+                self._refresh_highway()
                 self._update_quick_statistics()
                 if self.stats_table_group.isVisible():
                     self._update_statistics_table()
@@ -541,6 +621,7 @@ class MainWindow(QMainWindow):
                 self._update_statistics_table()
 
     def closeEvent(self, event):
+        self.highway_scanner.shutdown()
         if self.tb_logger is not None:
             self.tb_logger.close()
         super().closeEvent(event)

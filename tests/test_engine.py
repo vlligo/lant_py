@@ -80,3 +80,73 @@ if __name__ == "__main__":
     test_python_engine_multi_state_rule()
     print("All pure-Python engine tests passed.")
     test_cython_parity()
+
+
+# --------------------------------------------------------------------- #
+# Highway detection
+# --------------------------------------------------------------------- #
+def test_known_constant_matches_scanner_on_pristine_grid():
+    """The hardcoded constant and the lookahead scanner must agree."""
+    from engine.highway import KNOWN_HIGHWAYS, scan_for_highway
+
+    e = PyEngine()
+    e.set_rules("LR")
+    status = scan_for_highway(e, max_steps=100_000)
+    onset, period, translation = KNOWN_HIGHWAYS["LR"]
+
+    assert status.known and status.onset_step == onset
+    assert status.period == period and status.displacement == translation
+    assert status.certain
+
+
+def test_pristine_flag_cleared_by_randomize():
+    e = PyEngine()
+    e.set_rules("LR")
+    assert e.grid_pristine
+    e.randomize_area(10)
+    assert not e.grid_pristine, "randomizing must invalidate the highway constant"
+    e.reset()
+    assert e.grid_pristine
+
+
+def test_countdown_is_pure_subtraction():
+    from engine.highway import scan_for_highway
+
+    e = PyEngine()
+    e.set_rules("LR")
+    status = scan_for_highway(e, max_steps=100_000)
+    assert status.for_step(0).steps_remaining == status.onset_step
+    assert status.for_step(status.onset_step - 100).steps_remaining == 100
+    reached = status.for_step(status.onset_step + 500)
+    assert reached.reached and reached.steps_since_onset == 500
+
+
+def test_scan_finds_highway_after_randomize():
+    """The real point of the scanner: no constant exists here, and the
+    predicted onset must genuinely be the start of a periodic highway."""
+    import numpy as np
+    from engine.highway import scan_for_highway
+
+    np.random.seed(7)
+    e = PyEngine()
+    e.set_rules("LR")
+    e.randomize_area(20)
+
+    status = scan_for_highway(e, max_steps=400_000)
+    assert status.known, "no highway found on the randomized grid"
+    assert status.onset_step is not None
+
+    # Independently verify by running the LIVE engine to the predicted
+    # onset and checking the trajectory really is periodic from there.
+    e.next_step(status.onset_step)
+    period = status.period
+    dx, dy = status.displacement
+    traj = []
+    for _ in range(period * 4):
+        traj.append((e.ant_x, e.ant_y, e.ant_dir))
+        e.next_step(1)
+    for i in range(period * 3):
+        xa, ya, da = traj[i]
+        xb, yb, db = traj[i + period]
+        assert da == db and (xb - xa, yb - ya) == (dx, dy), \
+            f"trajectory not periodic at offset {i}"

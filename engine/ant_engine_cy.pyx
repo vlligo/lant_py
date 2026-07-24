@@ -72,6 +72,10 @@ cdef class AntEngine:
     cdef list next_state_lut_py
     cdef list direction_change_lut_py
     cdef public bint statistics_enabled
+    # True while this is a "pristine" run: empty grid, ant at the origin,
+    # nothing randomized or loaded. The known highway-onset constants in
+    # engine/highway.py are only valid in that case.
+    cdef public bint grid_pristine
     cdef object _lock
 
     cdef public long long ant_x, ant_y
@@ -90,6 +94,7 @@ cdef class AntEngine:
         self.next_state_lut_py = []
         self.direction_change_lut_py = []
         self.statistics_enabled = True
+        self.grid_pristine = True
         self._lock = threading.Lock()
         self.ant_x = 0
         self.ant_y = 0
@@ -127,6 +132,7 @@ cdef class AntEngine:
             self.max_visits = 0
             self.unique_cells_count = 0
             self._sim_start = time.perf_counter()
+            self.grid_pristine = True
 
     def reset_statistics(self):
         with self._lock:
@@ -318,6 +324,10 @@ cdef class AntEngine:
         if end_y > self.max_y:
             self.max_y = end_y
 
+        # The grid is no longer an untouched run, so the known highway-onset
+        # constant no longer applies - engine/highway.py must scan instead.
+        self.grid_pristine = False
+
     # ------------------------------------------------------------------ #
     def get_visit_count(self, long long x, long long y):
         if not self.statistics_enabled:
@@ -406,6 +416,7 @@ cdef class AntEngine:
             self.max_visits = data["max_visits"]
             self.unique_cells_count = data["unique_cells_count"]
             self.statistics_enabled = data["statistics_enabled"]
+            self.grid_pristine = False
 
             self.chunks.clear()
             for k, states in data["chunks"].items():

@@ -71,6 +71,11 @@ class AntEngine:
         self.unique_cells_count = 0
         self._sim_start = time.perf_counter()
 
+        # True while the run is a "pristine" one: empty grid, ant at the
+        # origin, nothing randomized or loaded. The known highway-onset
+        # constants (see engine/highway.py) are only valid in that case.
+        self.grid_pristine = True
+
     # ------------------------------------------------------------------ #
     # Rules / lifecycle
     # ------------------------------------------------------------------ #
@@ -98,6 +103,7 @@ class AntEngine:
             self.max_visits = 0
             self.unique_cells_count = 0
             self._sim_start = time.perf_counter()
+            self.grid_pristine = True
 
     def reset_statistics(self):
         with self._lock:
@@ -264,6 +270,10 @@ class AntEngine:
         if end_y > self.max_y:
             self.max_y = end_y
 
+        # The grid is no longer an untouched run, so the known highway-onset
+        # constant no longer applies — engine/highway.py must scan instead.
+        self.grid_pristine = False
+
     # ------------------------------------------------------------------ #
     # Statistics readback
     # ------------------------------------------------------------------ #
@@ -357,6 +367,7 @@ class AntEngine:
             self.max_visits = data["max_visits"]
             self.unique_cells_count = data["unique_cells_count"]
             self.statistics_enabled = data["statistics_enabled"]
+            self.grid_pristine = False
 
             self.chunks.clear()
             for k, states in data["chunks"].items():
